@@ -3,23 +3,30 @@ const args = @import("args.zig");
 const types = @import("types.zig");
 const http = @import("http.zig");
 
+const ParseError = args.ParseError;
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const io = init.io;
 
-    const parsedArgs = args.parseArgs(init) catch |err| {
-        std.log.err("Error: {}", .{err});
-        std.debug.print("\nUso: 4chnr -board <board> [-thread <número>]\n", .{});
-        return;
+    const parsedArgs = args.parseArgs(init) catch |err| switch (err) {
+        ParseError.ShowHelp => return,
+        else => {
+            std.log.err("Error: {}", .{err});
+            std.debug.print("\n", .{});
+            args.printUsage();
+            return;
+        },
     };
 
     if (parsedArgs.thread) |thread_no| {
+        // allocate the URL dynamically and discard it.
         const url = try std.fmt.allocPrint(allocator, "https://a.4cdn.org/{s}/thread/{d}.json", .{ parsedArgs.board, thread_no });
         defer allocator.free(url);
 
         const json = try http.fetchJson(allocator, io, url);
         defer allocator.free(json);
-        std.debug.print("=== JSON COMPLETO ===\n{s}\n=== FIN JSON ===\n\n", .{json});
+        // std.debug.print("=== JSON COMPLETO ===\n{s}\n=== FIN JSON ===\n\n", .{json});
 
         const parsed = try std.json.parseFromSlice(types.ThreadResponse, allocator, json, .{ .ignore_unknown_fields = true }); // ← importante
         defer parsed.deinit();
