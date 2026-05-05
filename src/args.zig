@@ -46,7 +46,7 @@ pub fn parseArgs(init: std.process.Init) !Args {
         \\-b, --board <str>           Tablero de 4chan
         \\-t, --thread <u64>          Número de thread
         \\-a, --archive               Ver threads archivados
-        \\    --boards                Listar todos los boards
+        \\-B, --boards                Listar todos los boards
         \\
     );
 

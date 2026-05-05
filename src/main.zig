@@ -2,22 +2,32 @@ const std = @import("std");
 const args_mod = @import("args.zig");
 const types = @import("types.zig");
 const http = @import("http.zig");
-
-//const ParseError = args.ParseError;
+const utils = @import("utils.zig");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const io = init.io;
 
+    var stdout_buffer: [32 * 1024]u8 = undefined;
+    var stderr_buffer: [8 * 1024]u8 = undefined;
+
+    var writers = utils.getStdWriters(io, &stdout_buffer, &stderr_buffer);
+
     const parsedArgs = args_mod.parseArgs(init) catch |err| switch (err) {
-        args_mod.ParseError.ShowHelp => return,
+        args_mod.ParseError.ShowHelp => {
+            try writers.stdout.interface.print("Should show the help ...\n", .{});
+            return;
+        },
         else => {
-            std.log.err("Error al parsear argumentos: {}", .{err});
+            try writers.stderr.interface.print("Error al parsear argumentos: {}", .{err});
             return;
         },
     };
 
+    try writers.stdout.interface.print("Args: {}\n", .{parsedArgs.list_boards});
+
     if (parsedArgs.list_boards) {
+        try writers.stdout.interface.print("Printing boards ...\n", .{});
         const url = "https://a.4cdn.org/boards.json";
 
         const json = try http.fetchJson(allocator, io, url);
@@ -26,13 +36,17 @@ pub fn main(init: std.process.Init) !void {
         const parsed = try std.json.parseFromSlice(types.BoardsResponse, allocator, json, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
 
-        std.debug.print("{d} boards disponibles:\n\n", .{parsed.value.boards.len});
+        try writers.stdout.interface.print("{d} boards disponibles:\n\n", .{parsed.value.boards.len});
         for (parsed.value.boards) |b| {
-            std.debug.print("  /{s}/ — {s}\n", .{ b.board, b.title });
+            try writers.stdout.interface.print("  /{s}/ — {s}\n", .{ b.board, b.title });
         }
 
         return;
+    } else {
+        try writers.stdout.interface.print("NO ...Printing boards ...\n", .{});
     }
+
+    const board = parsedArgs.board orelse unreachable;
 
     if (parsedArgs.thread) |thread_no| {
         // allocate the URL dynamically and discard it.
@@ -45,12 +59,12 @@ pub fn main(init: std.process.Init) !void {
         const parsed = try std.json.parseFromSlice(types.ThreadResponse, allocator, json, .{ .ignore_unknown_fields = true }); // ← importante
         defer parsed.deinit();
 
-        std.debug.print("Thread /{s}/ — No. {d}\n\n", .{ parsedArgs.board.?, thread_no });
+        try writers.stdout.interface.print("Thread /{s}/ — No. {d}\n\n", .{ board, thread_no });
 
         for (parsed.value.posts) |post| {
-            std.debug.print(">> No. {d}  {s}\n", .{ post.no, post.name orelse "Anonymous" });
-            if (post.sub) |sub| std.debug.print("Título: {s}\n", .{sub});
-            if (post.com) |com| std.debug.print("{s}\n\n", .{com});
+            try writers.stdout.interface.print(">> No. {d}  {s}\n", .{ post.no, post.name orelse "Anonymous" });
+            if (post.sub) |sub| try writers.stdout.interface.print("Título: {s}\n", .{sub});
+            if (post.com) |com| try writers.stdout.interface.print("{s}\n\n", .{com});
         }
     } else {
         const url = try std.fmt.allocPrint(allocator, "https://a.4cdn.org/{s}/catalog.json", .{parsedArgs.board.?});
@@ -62,12 +76,12 @@ pub fn main(init: std.process.Init) !void {
         const parsed = try std.json.parseFromSlice([]types.CatalogPage, allocator, json, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
 
-        std.debug.print("Catálogo de /{s}/ - {d} páginas\n\n", .{ parsedArgs.board.?, parsed.value.len });
+        try writers.stdout.interface.print("Catálogo de /{s}/ - {d} páginas\n\n", .{ parsedArgs.board.?, parsed.value.len });
 
         for (parsed.value) |page| {
-            std.debug.print("Página {d} ({d} threads)\n", .{ page.page, page.threads.len });
+            try writers.stdout.interface.print("Página {d} ({d} threads)\n", .{ page.page, page.threads.len });
             for (page.threads[0..@min(10, page.threads.len)]) |thread| { // muestra solo los primeros 10
-                std.debug.print("  >> {d} | {d} replies | {s} | {s}\n", .{
+                try writers.stdout.interface.print("  >> {d} | {d} replies | {s} | {s}\n", .{
                     thread.no,
                     thread.replies,
                     thread.sub orelse thread.com orelse "(sin título)",
@@ -76,4 +90,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
+
+    writers.stdout.flush() catch {};
+    writers.stderr.flush() catch {};
 }
