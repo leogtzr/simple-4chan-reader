@@ -1,5 +1,21 @@
+tmp/
+
+# Zig
 .zig-cache/
 zig-out/
-*.o
+zig-pkg/
 
-tmp/
+# Build artifacts
+*.o
+*.exe
+*.obj
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo

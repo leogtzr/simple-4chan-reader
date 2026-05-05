@@ -1,37 +1,51 @@
 const std = @import("std");
-const args = @import("args.zig");
+const args_mod = @import("args.zig");
 const types = @import("types.zig");
 const http = @import("http.zig");
 
-const ParseError = args.ParseError;
+//const ParseError = args.ParseError;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const io = init.io;
 
-    const parsedArgs = args.parseArgs(init) catch |err| switch (err) {
-        ParseError.ShowHelp => return,
+    const parsedArgs = args_mod.parseArgs(init) catch |err| switch (err) {
+        args_mod.ParseError.ShowHelp => return,
         else => {
-            std.log.err("Error: {}", .{err});
-            std.debug.print("\n", .{});
-            args.printUsage();
+            std.log.err("Error al parsear argumentos: {}", .{err});
             return;
         },
     };
 
+    if (parsedArgs.list_boards) {
+        const url = "https://a.4cdn.org/boards.json";
+
+        const json = try http.fetchJson(allocator, io, url);
+        defer allocator.free(json);
+
+        const parsed = try std.json.parseFromSlice(types.BoardsResponse, allocator, json, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+
+        std.debug.print("{d} boards disponibles:\n\n", .{parsed.value.boards.len});
+        for (parsed.value.boards) |b| {
+            std.debug.print("  /{s}/ — {s}\n", .{ b.board, b.title });
+        }
+
+        return;
+    }
+
     if (parsedArgs.thread) |thread_no| {
         // allocate the URL dynamically and discard it.
-        const url = try std.fmt.allocPrint(allocator, "https://a.4cdn.org/{s}/thread/{d}.json", .{ parsedArgs.board, thread_no });
+        const url = try std.fmt.allocPrint(allocator, "https://a.4cdn.org/{s}/thread/{d}.json", .{ parsedArgs.board.?, thread_no });
         defer allocator.free(url);
 
         const json = try http.fetchJson(allocator, io, url);
         defer allocator.free(json);
-        // std.debug.print("=== JSON COMPLETO ===\n{s}\n=== FIN JSON ===\n\n", .{json});
 
         const parsed = try std.json.parseFromSlice(types.ThreadResponse, allocator, json, .{ .ignore_unknown_fields = true }); // ← importante
         defer parsed.deinit();
 
-        std.debug.print("Thread /{s}/ — No. {d}\n\n", .{ parsedArgs.board, thread_no });
+        std.debug.print("Thread /{s}/ — No. {d}\n\n", .{ parsedArgs.board.?, thread_no });
 
         for (parsed.value.posts) |post| {
             std.debug.print(">> No. {d}  {s}\n", .{ post.no, post.name orelse "Anonymous" });
@@ -39,17 +53,16 @@ pub fn main(init: std.process.Init) !void {
             if (post.com) |com| std.debug.print("{s}\n\n", .{com});
         }
     } else {
-        const url = try std.fmt.allocPrint(allocator, "https://a.4cdn.org/{s}/catalog.json", .{parsedArgs.board});
+        const url = try std.fmt.allocPrint(allocator, "https://a.4cdn.org/{s}/catalog.json", .{parsedArgs.board.?});
         defer allocator.free(url);
 
         const json = try http.fetchJson(allocator, io, url);
         defer allocator.free(json);
 
-        //std.debug.print("Catálogo de /{s}/ cargado ({d} bytes)\n", .{ parsedArgs.board, json.len });
         const parsed = try std.json.parseFromSlice([]types.CatalogPage, allocator, json, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
 
-        std.debug.print("Catálogo de /{s}/ - {d} páginas\n\n", .{ parsedArgs.board, parsed.value.len });
+        std.debug.print("Catálogo de /{s}/ - {d} páginas\n\n", .{ parsedArgs.board.?, parsed.value.len });
 
         for (parsed.value) |page| {
             std.debug.print("Página {d} ({d} threads)\n", .{ page.page, page.threads.len });

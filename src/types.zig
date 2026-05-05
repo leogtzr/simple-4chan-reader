@@ -58,3 +58,34 @@ pub const CatalogPage = struct {
     page: u32, // ← Este campo faltaba
     threads: []CatalogThread,
 };
+
+pub const BoardCooldowns = struct {
+    threads: u32,
+    replies: u32,
+    images: u32,
+};
+
+pub const Board = struct {
+    board: []const u8,
+    title: []const u8,
+    ws_board: u32,
+    per_page: u32,
+    pages: u32,
+    max_filesize: u64,
+    max_webm_filesize: u64,
+    max_comment_chars: u32,
+    max_webm_duration: u32,
+    bump_limit: u32,
+    image_limit: u32,
+    cooldowns: BoardCooldowns,
+    meta_description: []const u8,
+    is_archived: ?u32 = null,
+    spoilers: ?u32 = null,
+    custom_spoilers: ?u32 = null,
+    user_ids: ?u32 = null,
+    country_flags: ?u32 = null,
+};
+
+pub const BoardsResponse = struct {
+    boards: []Board,
+};

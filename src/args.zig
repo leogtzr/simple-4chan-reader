@@ -1,8 +1,12 @@
 const std = @import("std");
+const clap = @import("clap");
 
 pub const Args = struct {
-    board: []const u8,
+    board: ?[]const u8 = null,
     thread: ?u64 = null,
+    archive: bool = false,
+    list_boards: bool = false, // mutual exclusive with -b or --board <board_name>
+    help: bool = false,
 };
 
 // Errors:
@@ -10,65 +14,65 @@ pub const ParseError = error{
     MissingBoard,
     MissingThread,
     InvalidThreadNumber,
+    InvalidCombination, // to handle the mix of -b and --boards
     ShowHelp,
 };
 
 pub const Error = ParseError || error{ OutOfMemory, Unexpected };
 
-pub fn printUsage() void {
-    std.debug.print(
-        \\Uso: 4chnr -board <board> [-thread <número>]
-        \\
-        \\Opciones:
-        \\  -board, --board <board>     Tablero de 4chan (obligatorio)
-        \\  -thread, --thread <número>  Número de thread específico
-        \\  -h, --help                  Muestra esta ayuda
-        \\
-        \\Examples:
-        \\  4chnr -board pol
-        \\  4chnr -board lit -thread 123456789
-        \\  4chnr --help
-        \\
-    , .{});
-}
-
-pub fn parseArgs(init: std.process.Init) Error!Args {
-    const args_slice = try init.minimal.args.toSlice(init.arena.allocator());
-
-    var board: ?[]const u8 = null;
-    var thread: ?u64 = null;
-    var show_help = false;
-
-    var i: usize = 1;
-    while (i < args_slice.len) : (i += 1) {
-        const arg = args_slice[i];
-        if (std.mem.eql(u8, arg, "-h") or
-            std.mem.eql(u8, arg, "-help") or
-            std.mem.eql(u8, arg, "--help"))
-        {
-            show_help = true;
-            continue;
-        } else if (std.mem.eql(u8, arg, "-board") or std.mem.eql(u8, arg, "--board")) {
-            i += 1;
-            if (i >= args_slice.len) return ParseError.MissingBoard;
-            board = args_slice[i];
-        } else if (std.mem.eql(u8, arg, "-thread") or std.mem.eql(u8, arg, "--thread")) {
-            i += 1;
-            if (i >= args_slice.len) return ParseError.MissingThread;
-            thread = std.fmt.parseInt(u64, args_slice[i], 10) catch return ParseError.InvalidThreadNumber;
-        } else {
-            std.debug.print("unknown option: '{s}'\n", .{arg});
-            return ParseError.ShowHelp;
+fn validateArgs(args: Args) !void {
+    if (args.list_boards) {
+        if (args.board != null) { // it means that the user has combined both options ...
+            std.debug.print("Error: --board and --boards used together\n", .{});
+            return ParseError.InvalidCombination;
         }
+        if (args.thread != null) {
+            std.debug.print("Error: --thread cannot be used with --boards\n", .{});
+            return ParseError.InvalidCombination;
+        }
+
+        return; // OK ...
     }
 
-    if (show_help) {
-        printUsage();
+    if (args.board == null) {
+        std.debug.print("Error: --board <board name> missing\n", .{});
+        return ParseError.MissingBoard;
+    }
+}
+
+pub fn parseArgs(init: std.process.Init) !Args {
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help                  Muestra esta ayuda
+        \\-b, --board <str>           Tablero de 4chan
+        \\-t, --thread <u64>          Número de thread
+        \\-a, --archive               Ver threads archivados
+        \\    --boards                Listar todos los boards
+        \\
+    );
+
+    var diag = clap.Diagnostic{};
+    var res = clap.parse(clap.Help, &params, clap.parsers.default, init.minimal.args, .{
+        .diagnostic = &diag,
+        .allocator = init.arena.allocator(),
+    }) catch |err| {
+        diag.reportToFile(init.io, .stderr(), err) catch {};
+        return err;
+    };
+    defer res.deinit();
+
+    if (res.args.help != 0) {
+        clap.helpToFile(init.io, .stdout(), clap.Help, &params, .{}) catch {};
         return ParseError.ShowHelp;
     }
 
-    return Args{
-        .board = board orelse return ParseError.MissingBoard,
-        .thread = thread,
+    const args = Args{
+        .board = res.args.board,
+        .thread = res.args.thread,
+        .archive = res.args.archive != 0,
+        .list_boards = res.args.boards != 0,
+        .help = res.args.help != 0,
     };
+
+    try validateArgs(args);
+    return args;
 }
