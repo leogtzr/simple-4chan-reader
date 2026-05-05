@@ -16,20 +16,17 @@ pub fn main(init: std.process.Init) !void {
     defer writers.stderr.flush() catch {};
 
     const parsedArgs = args_mod.parseArgs(init) catch |err| switch (err) {
-        args_mod.ParseError.ShowHelp => {
-            try writers.stdout.interface.print("Should show the help ...\n", .{});
-            return;
-        },
+        args_mod.ParseError.ShowHelp => return,
         else => {
             try writers.stderr.interface.print("Error al parsear argumentos: {}", .{err});
             return;
         },
     };
 
-    try writers.stdout.interface.print("Args: {}\n", .{parsedArgs.list_boards});
+    // try writers.stdout.interface.print("Args: {}\n", .{parsedArgs.list_boards});
 
     if (parsedArgs.list_boards) {
-        try writers.stdout.interface.print("Printing boards ...\n", .{});
+        // try writers.stdout.interface.print("Printing boards ...\n", .{});
         const url = "https://a.4cdn.org/boards.json";
 
         const json = try http.fetchJson(allocator, io, url);
@@ -40,12 +37,12 @@ pub fn main(init: std.process.Init) !void {
 
         try writers.stdout.interface.print("{d} boards disponibles:\n\n", .{parsed.value.boards.len});
         for (parsed.value.boards) |b| {
-            try writers.stdout.interface.print("  /{s}/ — {s}\n", .{ b.board, b.title });
+            const cleanMetaDescription = try utils.decodeQuotationMarks(allocator, b.meta_description);
+            defer allocator.free(cleanMetaDescription);
+            try writers.stdout.interface.print("/{s}/\t{s}\n", .{ b.board, cleanMetaDescription });
         }
 
         return;
-    } else {
-        try writers.stdout.interface.print("NO ...Printing boards ...\n", .{});
     }
 
     const board = parsedArgs.board orelse unreachable;
@@ -92,5 +89,4 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
-
 }

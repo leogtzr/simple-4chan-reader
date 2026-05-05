@@ -15,3 +15,7 @@ pub fn getStdWriters(
         .stderr = std.Io.File.stderr().writer(io, stderr_buf),
     };
 }
+
+pub fn decodeQuotationMarks(allocator: std.mem.Allocator, str: []const u8) ![]u8 {
+    return std.mem.replaceOwned(u8, allocator, str, "&quot;", "\"");
+}
