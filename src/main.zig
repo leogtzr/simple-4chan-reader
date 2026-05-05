@@ -12,6 +12,8 @@ pub fn main(init: std.process.Init) !void {
     var stderr_buffer: [8 * 1024]u8 = undefined;
 
     var writers = utils.getStdWriters(io, &stdout_buffer, &stderr_buffer);
+    defer writers.stdout.flush() catch {};
+    defer writers.stderr.flush() catch {};
 
     const parsedArgs = args_mod.parseArgs(init) catch |err| switch (err) {
         args_mod.ParseError.ShowHelp => {
@@ -91,6 +93,4 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    writers.stdout.flush() catch {};
-    writers.stderr.flush() catch {};
 }
