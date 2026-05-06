@@ -4,14 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // ====================== DEPENDENCIAS ======================
-    const clap = b.dependency("clap", .{}); // ← AÑADIR ESTA LÍNEA
-    // ========================================================
-
-    const mod = b.addModule("_4chnr", .{
-        .root_source_file = b.path("src/root.zig"),
+    const dvui_dep = b.dependency("dvui", .{
         .target = target,
+        .optimize = optimize,
+        .backend = .sdl2,
     });
+    const dvui_mod = dvui_dep.module("dvui_sdl2");
 
     const exe = b.addExecutable(.{
         .name = "_4chnr",
@@ -20,8 +18,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "_4chnr", .module = mod },
-                .{ .name = "clap", .module = clap.module("clap") }, // ← AÑADIR ESTA LÍNEA
+                .{ .name = "dvui", .module = dvui_mod },
             },
         }),
     });
@@ -36,19 +33,4 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
-
-    // Tests...
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
-    });
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
 }

@@ -1,92 +1,450 @@
 const std = @import("std");
-const args_mod = @import("args.zig");
+const dvui = @import("dvui");
 const types = @import("types.zig");
 const http = @import("http.zig");
 const utils = @import("utils.zig");
 
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.arena.allocator();
-    const io = init.io;
+// ── DVUI App boilerplate ─────────────────────────────────────────────────────
 
-    var stdout_buffer: [32 * 1024]u8 = undefined;
-    var stderr_buffer: [8 * 1024]u8 = undefined;
+pub const dvui_app: dvui.App = .{
+    .config = .{ .options = .{
+        .size = .{ .w = 960.0, .h = 680.0 },
+        .min_size = .{ .w = 500.0, .h = 300.0 },
+        .title = "4chan Reader",
+    } },
+    .frameFn = appFrame,
+    .initFn = appInit,
+    .deinitFn = appDeinit,
+};
+pub const main = dvui.App.main;
+pub const panic = dvui.App.panic;
+pub const std_options: std.Options = .{ .logFn = dvui.App.logFn };
 
-    var writers = utils.getStdWriters(io, &stdout_buffer, &stderr_buffer);
-    defer writers.stdout.flush() catch {};
-    defer writers.stderr.flush() catch {};
+// ── Allocator ────────────────────────────────────────────────────────────────
 
-    const parsedArgs = args_mod.parseArgs(init) catch |err| switch (err) {
-        args_mod.ParseError.ShowHelp => return,
-        else => {
-            try writers.stderr.interface.print("Error al parsear argumentos: {}", .{err});
-            return;
-        },
+// smp_allocator is thread-safe
+const alloc = std.heap.smp_allocator;
+
+// ── Simple spinlock mutex (critical sections are tiny, so spinning is fine) ──
+
+const Mutex = struct {
+    m: std.atomic.Mutex = .unlocked,
+
+    pub fn lock(self: *Mutex) void {
+        while (!self.m.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    pub fn unlock(self: *Mutex) void {
+        self.m.unlock();
+    }
+};
+
+// ── State ────────────────────────────────────────────────────────────────────
+
+const View = enum { loading, boards, catalog, thread, err };
+
+var g_mutex: Mutex = .{};
+var g_view: View = .loading;
+var g_boards: ?std.json.Parsed(types.BoardsResponse) = null;
+var g_catalog: ?std.json.Parsed([]types.CatalogPage) = null;
+var g_thread_data: ?std.json.Parsed(types.ThreadResponse) = null;
+var g_board: [64]u8 = undefined;
+var g_board_len: usize = 0;
+var g_thread_no: u64 = 0;
+var g_error: [512]u8 = undefined;
+var g_error_len: usize = 0;
+var g_win: *dvui.Window = undefined;
+var g_io: std.Io = undefined;
+
+// ── Lifecycle ────────────────────────────────────────────────────────────────
+
+pub fn appInit(win: *dvui.Window) !void {
+    g_win = win;
+    g_io = dvui.App.main_init.?.io;
+    (try std.Thread.spawn(.{}, fetchBoards, .{})).detach();
+}
+
+pub fn appDeinit() void {
+    g_mutex.lock();
+    defer g_mutex.unlock();
+    if (g_boards) |*b| b.deinit();
+    if (g_catalog) |*c| c.deinit();
+    if (g_thread_data) |*t| t.deinit();
+}
+
+// ── Background workers ────────────────────────────────────────────────────────
+
+fn setError(comptime fmt: []const u8, args: anytype) void {
+    g_mutex.lock();
+    const msg = std.fmt.bufPrint(&g_error, fmt, args) catch "error (truncated)";
+    g_error_len = msg.len;
+    g_view = .err;
+    g_mutex.unlock();
+    dvui.refresh(g_win, @src(), null);
+}
+
+fn fetchBoards() void {
+    const json = http.fetchJson(alloc, g_io, "https://a.4cdn.org/boards.json") catch |e| {
+        setError("Boards fetch: {}", .{e});
+        return;
+    };
+    defer alloc.free(json);
+
+    const parsed = std.json.parseFromSlice(
+        types.BoardsResponse,
+        alloc,
+        json,
+        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+    ) catch |e| {
+        setError("Boards parse: {}", .{e});
+        return;
     };
 
-    // try writers.stdout.interface.print("Args: {}\n", .{parsedArgs.list_boards});
+    g_mutex.lock();
+    if (g_boards) |*old| old.deinit();
+    g_boards = parsed;
+    g_view = .boards;
+    g_mutex.unlock();
+    dvui.refresh(g_win, @src(), null);
+}
 
-    if (parsedArgs.list_boards) {
-        // try writers.stdout.interface.print("Printing boards ...\n", .{});
-        const url = "https://a.4cdn.org/boards.json";
+fn fetchCatalog() void {
+    g_mutex.lock();
+    const blen = g_board_len;
+    var board_copy: [64]u8 = undefined;
+    @memcpy(board_copy[0..blen], g_board[0..blen]);
+    g_mutex.unlock();
 
-        const json = try http.fetchJson(allocator, io, url);
-        defer allocator.free(json);
+    const board = board_copy[0..blen];
 
-        const parsed = try std.json.parseFromSlice(types.BoardsResponse, allocator, json, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit();
-
-        try writers.stdout.interface.print("{d} boards disponibles:\n\n", .{parsed.value.boards.len});
-        for (parsed.value.boards) |b| {
-            const cleanMetaDescription = try utils.decodeQuotationMarks(allocator, b.meta_description);
-            defer allocator.free(cleanMetaDescription);
-            try writers.stdout.interface.print("/{s}/\t{s}\n", .{ b.board, cleanMetaDescription });
-        }
-
+    const url = std.fmt.allocPrint(alloc, "https://a.4cdn.org/{s}/catalog.json", .{board}) catch |e| {
+        setError("allocPrint: {}", .{e});
         return;
-    }
+    };
+    defer alloc.free(url);
 
-    const board = parsedArgs.board orelse unreachable;
+    const json = http.fetchJson(alloc, g_io, url) catch |e| {
+        setError("Catalog fetch /{s}/: {}", .{ board, e });
+        return;
+    };
+    defer alloc.free(json);
 
-    if (parsedArgs.thread) |thread_no| {
-        // allocate the URL dynamically and discard it.
-        const url = try std.fmt.allocPrint(allocator, "https://a.4cdn.org/{s}/thread/{d}.json", .{ parsedArgs.board.?, thread_no });
-        defer allocator.free(url);
+    const parsed = std.json.parseFromSlice(
+        []types.CatalogPage,
+        alloc,
+        json,
+        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+    ) catch |e| {
+        setError("Catalog parse: {}", .{e});
+        return;
+    };
 
-        const json = try http.fetchJson(allocator, io, url);
-        defer allocator.free(json);
+    g_mutex.lock();
+    if (g_catalog) |*old| old.deinit();
+    g_catalog = parsed;
+    g_view = .catalog;
+    g_mutex.unlock();
+    dvui.refresh(g_win, @src(), null);
+}
 
-        const parsed = try std.json.parseFromSlice(types.ThreadResponse, allocator, json, .{ .ignore_unknown_fields = true }); // ← importante
-        defer parsed.deinit();
+fn fetchThread() void {
+    g_mutex.lock();
+    const blen = g_board_len;
+    var board_copy: [64]u8 = undefined;
+    @memcpy(board_copy[0..blen], g_board[0..blen]);
+    const no = g_thread_no;
+    g_mutex.unlock();
 
-        try writers.stdout.interface.print("Thread /{s}/ — No. {d}\n\n", .{ board, thread_no });
+    const board = board_copy[0..blen];
 
-        for (parsed.value.posts) |post| {
-            try writers.stdout.interface.print(">> No. {d}  {s}\n", .{ post.no, post.name orelse "Anonymous" });
-            if (post.sub) |sub| try writers.stdout.interface.print("Título: {s}\n", .{sub});
-            if (post.com) |com| try writers.stdout.interface.print("{s}\n\n", .{com});
-        }
-    } else {
-        const url = try std.fmt.allocPrint(allocator, "https://a.4cdn.org/{s}/catalog.json", .{parsedArgs.board.?});
-        defer allocator.free(url);
+    const url = std.fmt.allocPrint(
+        alloc,
+        "https://a.4cdn.org/{s}/thread/{d}.json",
+        .{ board, no },
+    ) catch |e| {
+        setError("allocPrint: {}", .{e});
+        return;
+    };
+    defer alloc.free(url);
 
-        const json = try http.fetchJson(allocator, io, url);
-        defer allocator.free(json);
+    const json = http.fetchJson(alloc, g_io, url) catch |e| {
+        setError("Thread fetch: {}", .{e});
+        return;
+    };
+    defer alloc.free(json);
 
-        const parsed = try std.json.parseFromSlice([]types.CatalogPage, allocator, json, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit();
+    const parsed = std.json.parseFromSlice(
+        types.ThreadResponse,
+        alloc,
+        json,
+        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+    ) catch |e| {
+        setError("Thread parse: {}", .{e});
+        return;
+    };
 
-        try writers.stdout.interface.print("Catálogo de /{s}/ - {d} páginas\n\n", .{ parsedArgs.board.?, parsed.value.len });
+    g_mutex.lock();
+    if (g_thread_data) |*old| old.deinit();
+    g_thread_data = parsed;
+    g_view = .thread;
+    g_mutex.unlock();
+    dvui.refresh(g_win, @src(), null);
+}
 
-        for (parsed.value) |page| {
-            try writers.stdout.interface.print("Página {d} ({d} threads)\n", .{ page.page, page.threads.len });
-            for (page.threads[0..@min(10, page.threads.len)]) |thread| { // muestra solo los primeros 10
-                try writers.stdout.interface.print("  >> {d} | {d} replies | {s} | {s}\n", .{
-                    thread.no,
-                    thread.replies,
-                    thread.sub orelse thread.com orelse "(sin título)",
-                    thread.filename orelse "(no image)",
-                });
+// ── Frame function ───────────────────────────────────────────────────────────
+
+pub fn appFrame() !dvui.App.Result {
+    g_mutex.lock();
+    const view = g_view;
+    g_mutex.unlock();
+
+    return switch (view) {
+        .loading => blk: {
+            var box = dvui.box(@src(), .{ .dir = .vertical }, .{
+                .expand = .both,
+                .gravity_x = 0.5,
+                .gravity_y = 0.5,
+            });
+            defer box.deinit();
+            dvui.label(@src(), "Loading...", .{}, .{});
+            break :blk .ok;
+        },
+        .boards => try renderBoards(),
+        .catalog => try renderCatalog(),
+        .thread => try renderThread(),
+        .err => blk: {
+            var err_buf: [512]u8 = undefined;
+            g_mutex.lock();
+            const elen = @min(g_error_len, err_buf.len);
+            @memcpy(err_buf[0..elen], g_error[0..elen]);
+            g_mutex.unlock();
+            const err_msg = err_buf[0..elen];
+
+            dvui.label(@src(), "Error: {s}", .{err_msg}, .{
+                .gravity_x = 0.5,
+                .gravity_y = 0.45,
+                .color_text = .{ .r = 220, .g = 60, .b = 60, .a = 255 },
+            });
+            if (dvui.button(@src(), "Back to Boards", .{}, .{
+                .gravity_x = 0.5,
+                .gravity_y = 0.55,
+            })) {
+                g_mutex.lock();
+                g_view = .boards;
+                g_mutex.unlock();
             }
+            break :blk .ok;
+        },
+    };
+}
+
+// ── Views ────────────────────────────────────────────────────────────────────
+
+fn renderBoards() !dvui.App.Result {
+    // Read g_boards under the lock so the compiler cannot hoist the load
+    // above the mutex's acquire barrier.
+    g_mutex.lock();
+    const opt_parsed = g_boards;
+    g_mutex.unlock();
+    const parsed = opt_parsed orelse return .ok;
+    const boards = parsed.value.boards;
+
+    {
+        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .background = true,
+            .style = .window,
+        });
+        defer hbox.deinit();
+        dvui.label(@src(), "4chan — {d} boards", .{boards.len}, .{});
+    }
+
+    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
+    defer scroll.deinit();
+
+    for (boards, 0..) |board, i| {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .id_extra = i,
+        });
+        defer row.deinit();
+
+        var btn_buf: [32]u8 = undefined;
+        const btn_label = std.fmt.bufPrint(&btn_buf, "/{s}/", .{board.board}) catch board.board;
+
+        if (dvui.button(@src(), btn_label, .{}, .{
+            .min_size_content = .{ .w = 80.0 },
+        })) {
+            navigateToCatalog(board.board);
+        }
+
+        dvui.label(@src(), "{s}", .{board.title}, .{ .expand = .horizontal });
+    }
+
+    return .ok;
+}
+
+fn renderCatalog() !dvui.App.Result {
+    var board_copy: [64]u8 = undefined;
+    g_mutex.lock();
+    const opt_parsed = g_catalog;
+    const blen = g_board_len;
+    @memcpy(board_copy[0..blen], g_board[0..blen]);
+    g_mutex.unlock();
+    const parsed = opt_parsed orelse return .ok;
+    const board = board_copy[0..blen];
+
+    {
+        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .background = true,
+            .style = .window,
+        });
+        defer hbox.deinit();
+
+        if (dvui.button(@src(), "< Boards", .{}, .{})) {
+            g_mutex.lock();
+            g_view = .boards;
+            g_mutex.unlock();
+            return .ok;
+        }
+        dvui.label(@src(), " /{s}/ Catalog", .{board}, .{});
+    }
+
+    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
+    defer scroll.deinit();
+
+    var idx: usize = 0;
+    for (parsed.value) |page| {
+        for (page.threads) |thread| {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .expand = .horizontal,
+                .id_extra = idx,
+            });
+            defer row.deinit();
+
+            var btn_buf: [32]u8 = undefined;
+            const btn_label = std.fmt.bufPrint(&btn_buf, "{d}", .{thread.no}) catch "?";
+            if (dvui.button(@src(), btn_label, .{}, .{
+                .min_size_content = .{ .w = 90.0 },
+            })) {
+                navigateToThread(board, thread.no);
+            }
+
+            const raw_title = thread.sub orelse thread.com orelse "(no title)";
+            const max_len = @min(raw_title.len, 100);
+            dvui.labelNoFmt(@src(), raw_title[0..max_len], .{}, .{ .expand = .horizontal });
+
+            dvui.label(@src(), "{d}R", .{thread.replies}, .{
+                .min_size_content = .{ .w = 40.0 },
+                .color_text = .{ .r = 130, .g = 200, .b = 130, .a = 255 },
+            });
+
+            idx += 1;
         }
     }
+
+    return .ok;
+}
+
+fn renderThread() !dvui.App.Result {
+    var board_copy: [64]u8 = undefined;
+    g_mutex.lock();
+    const opt_parsed = g_thread_data;
+    const blen = g_board_len;
+    @memcpy(board_copy[0..blen], g_board[0..blen]);
+    const no = g_thread_no;
+    g_mutex.unlock();
+    const parsed = opt_parsed orelse return .ok;
+    const board = board_copy[0..blen];
+
+    {
+        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .background = true,
+            .style = .window,
+        });
+        defer hbox.deinit();
+
+        if (dvui.button(@src(), "< Catalog", .{}, .{})) {
+            g_mutex.lock();
+            g_view = .catalog;
+            g_mutex.unlock();
+            return .ok;
+        }
+        dvui.label(@src(), " /{s}/ — No.{d} ({d} posts)", .{
+            board, no, parsed.value.posts.len,
+        }, .{});
+    }
+
+    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
+    defer scroll.deinit();
+
+    for (parsed.value.posts, 0..) |post, i| {
+        var card = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .expand = .horizontal,
+            .id_extra = i,
+            .background = true,
+            .style = .window,
+            .margin = .{ .x = 4, .y = 2, .w = 4, .h = 2 },
+            .padding = .{ .x = 6, .y = 4, .w = 6, .h = 4 },
+        });
+        defer card.deinit();
+
+        // Post header
+        {
+            var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            defer hdr.deinit();
+            dvui.label(@src(), "No.{d}", .{post.no}, .{
+                .color_text = .{ .r = 180, .g = 140, .b = 60, .a = 255 },
+            });
+            dvui.label(@src(), "  {s}", .{post.name orelse "Anonymous"}, .{
+                .color_text = .{ .r = 100, .g = 170, .b = 100, .a = 255 },
+            });
+        }
+
+        // Subject
+        if (post.sub) |sub| {
+            dvui.labelNoFmt(@src(), sub, .{}, .{
+                .expand = .horizontal,
+                .color_text = .{ .r = 140, .g = 140, .b = 220, .a = 255 },
+            });
+        }
+
+        // Comment (strip HTML tags/entities)
+        if (post.com) |com| {
+            const buf = alloc.alloc(u8, com.len) catch continue;
+            defer alloc.free(buf);
+            const stripped = utils.stripHtml(buf, com);
+
+            var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal });
+            defer tl.deinit();
+            tl.addText(stripped, .{});
+        }
+    }
+
+    return .ok;
+}
+
+// ── Navigation helpers ────────────────────────────────────────────────────────
+
+fn navigateToCatalog(board: []const u8) void {
+    g_mutex.lock();
+    const blen = @min(board.len, g_board.len);
+    @memcpy(g_board[0..blen], board[0..blen]);
+    g_board_len = blen;
+    g_view = .loading;
+    g_mutex.unlock();
+    (std.Thread.spawn(.{}, fetchCatalog, .{}) catch return).detach();
+}
+
+fn navigateToThread(board: []const u8, thread_no: u64) void {
+    g_mutex.lock();
+    const blen = @min(board.len, g_board.len);
+    @memcpy(g_board[0..blen], board[0..blen]);
+    g_board_len = blen;
+    g_thread_no = thread_no;
+    g_view = .loading;
+    g_mutex.unlock();
+    (std.Thread.spawn(.{}, fetchThread, .{}) catch return).detach();
 }
