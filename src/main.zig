@@ -84,6 +84,7 @@ fn setError(comptime fmt: []const u8, args: anytype) void {
 }
 
 fn fetchBoards() void {
+    std.debug.print("debug:x Fetching boards ... ", .{});
     const json = http.fetchJson(alloc, g_io, "https://a.4cdn.org/boards.json") catch |e| {
         setError("Boards fetch: {}", .{e});
         return;
@@ -332,10 +333,13 @@ fn renderCatalog() !dvui.App.Result {
             }
 
             const raw_title = thread.sub orelse thread.com orelse "(no title)";
-            const max_len = @min(raw_title.len, 100);
-            dvui.labelNoFmt(@src(), raw_title[0..max_len], .{}, .{ .expand = .horizontal });
+            const title_buf = alloc.alloc(u8, raw_title.len) catch null;
+            defer if (title_buf) |b| alloc.free(b);
+            const display_title = if (title_buf) |b| utils.stripHtml(b, raw_title) else raw_title;
+            const max_len = @min(display_title.len, 100);
+            dvui.labelNoFmt(@src(), display_title[0..max_len], .{}, .{ .expand = .horizontal });
 
-            dvui.label(@src(), "{d}R", .{thread.replies}, .{
+            dvui.label(@src(), "{d}R|{?d}I", .{ thread.replies, thread.images }, .{
                 .min_size_content = .{ .w = 40.0 },
                 .color_text = .{ .r = 130, .g = 200, .b = 130, .a = 255 },
             });
@@ -380,7 +384,16 @@ fn renderThread() !dvui.App.Result {
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
     defer scroll.deinit();
 
+    // Build the HTML-encoded quote pattern for the OP post number once.
+    var op_quote_buf: [32]u8 = undefined;
+    const op_quote = std.fmt.bufPrint(&op_quote_buf, "&gt;&gt;{d}", .{no}) catch "";
+
     for (parsed.value.posts, 0..) |post, i| {
+        const replies_to_op = if (post.com) |com|
+            op_quote.len > 0 and std.mem.indexOf(u8, com, op_quote) != null
+        else
+            false;
+
         var card = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
             .id_extra = i,
@@ -401,6 +414,11 @@ fn renderThread() !dvui.App.Result {
             dvui.label(@src(), "  {s}", .{post.name orelse "Anonymous"}, .{
                 .color_text = .{ .r = 100, .g = 170, .b = 100, .a = 255 },
             });
+            if (replies_to_op) {
+                dvui.label(@src(), "  ^ OP", .{}, .{
+                    .color_text = .{ .r = 200, .g = 100, .b = 220, .a = 255 },
+                });
+            }
         }
 
         // Subject
