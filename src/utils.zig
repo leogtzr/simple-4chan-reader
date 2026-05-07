@@ -40,6 +40,10 @@ pub fn stripHtml(dst: []u8, src: []const u8) []u8 {
                 dst[di] = '>';
                 di += 1;
                 i += 4;
+            } else if (std.mem.startsWith(u8, rest, "&#039;")) {
+                dst[di] = '\'';
+                di += 1;
+                i += 6;
             } else if (std.mem.startsWith(u8, rest, "&#39;") or
                 std.mem.startsWith(u8, rest, "&apos;"))
             {
